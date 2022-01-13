@@ -6,100 +6,112 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from action_msgs.msg import GoalStatus
-from rclpy.logging import LoggingSeverity
 from rclpy.task import Future
 from rclpy.executors import MultiThreadedExecutor
-from interfaces.action import For
 from concurrent.futures import ThreadPoolExecutor
+
+from actions import ServerNode, ClientGoalHandleSpec
+from interfaces.action import Wait
 
 
 class ClientNode(Node):
 
+    _action_future: Future | None = None
+
     def __init__(self):
         super().__init__('action_client')
 
-        self._action_future: Future | None = None
-        self._get_result_future: Future | None = None
-        self.get_logger().set_level(LoggingSeverity.DEBUG)
+        self.get_logger().info('>> __init__')
 
-        self.get_logger().debug(f'__init__')
+        self._action_client: ActionClient = ActionClient(self, Wait, ServerNode.Action.WAIT)
 
-        self._action_client: ActionClient = ActionClient(self, For, 'for')
+        self.get_logger().info('<< __init__')
 
-    def run(self):
+    def run(self, count: int = 10, timeout: float = 1.0):
 
-        self.get_logger().debug(f'run')
+        self.get_logger().info('>> run')
 
-        goal = For.Goal()
-        goal.count = 10
+        goal = Wait.Goal()
+        goal.count = count
+        goal.timeout = timeout
 
         self._action_client.wait_for_server()
 
         def feedback_callback(feedback_msg):
-            self.get_logger().debug(f"current index: {feedback_msg.feedback.index}")
+            self.get_logger().info("-- feedback_callback")
+            feedback: Wait.Wait_Feedback = feedback_msg.feedback
+            self.get_logger().info(f"   feedback: {feedback.index=}")
 
         def result_callback(future: Future):
-            self.get_logger().debug(f"result_callback: {future}")
+            self.get_logger().info("-- result_callback")
 
             goal_result = future.result()
-            result: For.Result = goal_result.result
+            result: Wait.Result = goal_result.result
 
             if goal_result.status == GoalStatus.STATUS_ABORTED:
-                self.get_logger().debug(f"result: STATUS_ABORTED")
+                self.get_logger().info("   result: STATUS_ABORTED")
             elif goal_result.status == GoalStatus.STATUS_CANCELED:
-                self.get_logger().debug(f"result: STATUS_CANCELED")
+                self.get_logger().info(f"   result: STATUS_CANCELED")
+                self._action_future = None
             else:
-                self.get_logger().debug(f"result {result.result}")
-
-            self._action_future = None
-            self._action_get_result_future = None
-            self._goal_response = None
+                self.get_logger().info(f"   result: {result.end_count=}")
+                self._action_future = None
 
         def response_callback(future: Future):
-            self.get_logger().debug(f"response_callback: {future}")
+            self.get_logger().info("-- response_callback")
 
-            self._goal_response = future.result()
-            if not self._goal_response.accepted:
+            goal_request = future.result()
+            if not goal_request.accepted:
+                self.get_logger().info(f"   request is not accepted")
                 self._action_future = None
-                self._action_get_result_future = None
-                self._goal_response = None
                 return
 
-            self._get_result_future = self._goal_response.get_result_async()
-            self._get_result_future.add_done_callback(result_callback)
+            self.get_logger().info(f"   request is accepted")
+            get_result_future = goal_request.get_result_async()
+            get_result_future.add_done_callback(result_callback)
 
         self._action_future = self._action_client.send_goal_async(goal, feedback_callback=feedback_callback)
         self._action_future.add_done_callback(response_callback)
 
+        self.get_logger().info('<< run')
+
     def cancel(self):
-        self.get_logger().info('Need to cancel')
+        self.get_logger().info('>> cancel')
 
         goal = self._action_future.result()
         goal.cancel_goal()
 
+        self.get_logger().info('<< cancel')
 
-def _cancel(action_client: ActionClientNode):
+
+thread_pool = ThreadPoolExecutor(10)
+
+
+def _cancel(node: ClientNode):
+    time.sleep(6)
+    node.cancel()
     time.sleep(3)
-    action_client.cancel()
+    node.run()
 
 
-def _rerun(action_client: ActionClientNode):
+def _rerun(node: ClientNode):
     time.sleep(3)
-    action_client.run()
+    node.run()
 
 
 def main(args=None):
     rclpy.init(args=args)
 
-    thread_pool = ThreadPoolExecutor(2)
-    action_client = ActionClientNode()
+    node = ClientNode()
 
-    action_client.run()
+    node.run()
+    thread_pool.submit(_rerun, node)
+    thread_pool.submit(_cancel, node)
 
-    # thread_pool.submit(_rerun, action_client)
-    thread_pool.submit(_cancel, action_client)
-
-    rclpy.spin(action_client, executor=MultiThreadedExecutor())
+    try:
+        rclpy.spin(node, executor=MultiThreadedExecutor())
+    except KeyboardInterrupt:
+        pass
     rclpy.shutdown()
 
 
