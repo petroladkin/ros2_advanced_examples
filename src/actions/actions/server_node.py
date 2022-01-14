@@ -19,8 +19,10 @@ class ServerNode(Node):
     class Action(str, Enum):
         WAIT = 'action/wait'
 
+    _running: bool = False
     _need_to_cancel: bool = False
-    _goal_handle: ServerGoalHandleSpec | None = None
+    _need_to_abort: bool = False
+
     _goal_lock = threading.Lock()
     _execute_lock = threading.Lock()
 
@@ -57,8 +59,8 @@ class ServerNode(Node):
 
         with self._goal_lock:
             # set flag to cancel current action
-            if self._goal_handle is not None and self._goal_handle.is_active:
-                self.get_logger().info(f'<{id(goal_handle)}>:   set cancel flag for goal <{id(self._goal_handle)}>')
+            if self._running:
+                self.get_logger().info(f'<{id(goal_handle)}>:   set cancel flag for previous goal')
                 self._need_to_cancel = True
 
         self.get_logger().info(f'<{id(goal_handle)}>: << __cancel_cb')
@@ -75,13 +77,9 @@ class ServerNode(Node):
 
         with self._goal_lock:
             # if running previous action then need cancel it
-            if self._goal_handle is not None and self._goal_handle.is_active:
-                self.get_logger().info(f'<{id(goal_handle)}>:   abort goal <{id(self._goal_handle)}>')
-                self._goal_handle.abort()
-
-            # save goal handle and reset cancel flag
-            self._need_to_cancel = False
-            self._goal_handle = goal_handle
+            if self._running:
+                self.get_logger().info(f'<{id(goal_handle)}>:   set abort flag for previous goal')
+                self._need_to_abort = True
 
             goal_handle.execute()
 
@@ -93,6 +91,11 @@ class ServerNode(Node):
 
         with self._execute_lock:
             result = Wait.Result()
+
+            with self._goal_lock:
+                self._running = True
+                self._need_to_abort = False
+                self._need_to_cancel = False
 
             incoming_goal: Wait.Goal = goal_handle.request
             self.get_logger().info(f'<{id(goal_handle)}>:    {incoming_goal.timeout=}')
@@ -107,21 +110,25 @@ class ServerNode(Node):
 
                 result.end_count = i
 
-                # to cancel if set cancel flag
+                # to cancel if did set cancel flag
                 if self._need_to_cancel:
                     self.get_logger().info(f'<{id(goal_handle)}>:   need to cancel [self._need_to_cancel]')
                     goal_handle.canceled()
                     self.get_logger().info(f'<{id(goal_handle)}>: << __exec_cb [canceled]')
                     return result
 
-                # to exit if goal aborted (see self.__accepted_cb)
-                if not goal_handle.is_active:
+                # to abort if did set abort flag
+                if self._need_to_abort:
                     self.get_logger().info(f'<{id(goal_handle)}>:   need to cancel [not is_active]')
+                    goal_handle.abort()
                     self.get_logger().info(f'<{id(goal_handle)}>: << __exec_cb [aborted]')
                     return result
 
             # normal exit
             goal_handle.succeed()
+
+            with self._goal_lock:
+                self._running = False
 
             self.get_logger().info(f'<{id(goal_handle)}>: << __exec_cb [normal]]')
             return result
